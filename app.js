@@ -5,8 +5,106 @@ try{records=JSON.parse(localStorage.getItem('qr-studio-history')||'[]');if(!Arra
 function assess(text){const reasons=[];let url;const s=text.trim();if(/^(javascript|data|vbscript|file):/i.test(s))return {url:null,reasons:['This code contains a potentially dangerous URL scheme.'],warning:true};try{url=new URL(/^www\./i.test(s)?'https://'+s:s)}catch{return {url:null,reasons,warning:false}}if(!['http:','https:'].includes(url.protocol))return {url:null,reasons,warning:false};if(url.protocol==='http:')reasons.push('This link uses unencrypted HTTP.');if(url.username||url.password)reasons.push('This URL hides credentials before the real destination.');if(/(^|\.)xn--/i.test(url.hostname))reasons.push('The domain uses encoded characters that can imitate another name.');if(/^(\d{1,3}\.){3}\d{1,3}$/.test(url.hostname)||url.hostname.includes(':'))reasons.push('This link uses an IP address instead of a domain name.');if(['bit.ly','tinyurl.com','t.co','is.gd','cutt.ly','rb.gy'].includes(url.hostname))reasons.push('A shortened link conceals its final destination.');if(/\.(exe|scr|msi|bat|cmd|ps1|apk)(\/|$)/i.test(url.pathname))reasons.push('This link may download executable software.');if(url.hostname==='localhost'||url.hostname.endsWith('.local'))reasons.push('This link points to a local device.');return {url:url.href,reasons,warning:reasons.length>0}}
 function save(type,text,source){const r={id:crypto.randomUUID(),type,text,source,date:new Date().toISOString()};records.unshift(r);try{localStorage.setItem('qr-studio-history',JSON.stringify(records))}catch{$('message').textContent='Your browser storage is full. This activity could not be saved.'}renderHistory();return r}
 function node(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n}
-function showResult(text){const a=assess(text),box=$('result');box.replaceChildren();box.hidden=false;box.className=a.warning?'warning':'';box.append(node('strong','',a.warning?'⚠ Suspicious link — take a closer look':a.url?'↗ Link found':'✓ QR content'));if(a.url){const link=node('a',a.warning?'red':'',text);link.href=a.url;link.target='_blank';link.rel='noopener noreferrer';link.addEventListener('click',e=>{if(a.warning&&!confirm('This link has warning signs. Open it anyway?'))e.preventDefault()});box.append(link)}else box.append(node('span',a.warning?'red':'',text));for(const reason of a.reasons)box.append(node('p','red',reason));if(a.url&&!a.warning)box.append(node('p','','No common warning signs found. This is not a reputation or malware check.'));const copy=node('button','secondary','Copy content');copy.onclick=async()=>{try{await navigator.clipboard.writeText(text);copy.textContent='Copied ✓'}catch{$('message').textContent='Clipboard unavailable. Select the content to copy it.'}};box.append(document.createElement('br'),copy)}
-function renderHistory(){const list=$('historyList');list.replaceChildren();$('count').textContent=records.length;const visible=records.filter(r=>$('filter').value==='all'||r.type===$('filter').value);if(!visible.length){const empty=node('div','empty');empty.append(node('b','','◷'),node('span','',records.length?'No matching activity.':'Your next connection starts here. Scan or create a QR code.'));list.append(empty);return}for(const r of visible){const row=node('div','activity'),a=assess(r.text);row.append(node('span','activity-icon',r.type==='read'?'⌗':'＋'));const info=node('div','activity-main');info.append(node('strong',a.warning?'red':'',r.text),node('small','',new Date(r.date).toLocaleString()+' · '+r.source));row.append(info,node('span','badge',r.type==='read'?'READ':'CREATED'));const view=node('button','','↗');view.setAttribute('aria-label','View activity');view.onclick=()=>{showResult(r.text);$('result').scrollIntoView({behavior:'smooth',block:'center'})};row.append(view);list.append(row)}}
+let resultVersion = 0;
+function showResult(text, record = records.find(r => r.text === text)) {
+  const version = ++resultVersion;
+  const a = assess(text), box = $('result');
+  box.replaceChildren(); box.hidden = false;
+  box.className = a.warning ? 'warning' : '';
+  const heading = node('strong', '', a.warning ? '⚠ Suspicious link — take a closer look' : a.url ? '↗ Link found' : '✓ QR content');
+  box.append(heading);
+  let link, checking = false, unverified = true, flagged = a.warning;
+  if (a.url) {
+    link = node('a', a.warning ? 'red' : '', text);
+    link.href = a.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.addEventListener('click', event => {
+      if (checking) { event.preventDefault(); return; }
+      if ((flagged || unverified) && !confirm(flagged ? 'This link has warning signs. Opening it may be unsafe. Continue?' : 'This link is unverified. Continue at your own risk?')) event.preventDefault();
+    });
+    box.append(link);
+  } else box.append(node('span', a.warning ? 'red' : '', text));
+  for (const reason of a.reasons) box.append(node('p', 'red', reason));
+  const copy = node('button', 'secondary', 'Copy content');
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); copy.textContent = 'Copied ✓'; }
+    catch { $('message').textContent = 'Clipboard unavailable. Select the content to copy it.'; }
+  };
+  box.append(document.createElement('br'), copy);
+  if (!a.url) return;
+  const vt = node('div', 'vt-panel');
+  box.append(vt);
+  function saveCheck(data) {
+    if (!record || !records.includes(record)) return;
+    record.virustotal = { ...data, checked_at: new Date().toISOString() };
+    try { localStorage.setItem('qr-studio-history', JSON.stringify(records)); } catch {}
+    renderHistory();
+  }
+  async function runCheck(submit = false) {
+    if (checking || version !== resultVersion) return;
+    checking = true; unverified = true;
+    link.setAttribute('aria-disabled', 'true');
+    vt.replaceChildren(node('strong', '', submit ? 'Submitting URL to VirusTotal…' : 'Checking VirusTotal…'));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    let data;
+    try {
+      const response = await fetch('/api/virustotal/check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: a.url, submit }), signal: controller.signal
+      });
+      const body = await response.json();
+      if (!response.ok) throw Error(body.message || 'VirusTotal check failed.');
+      data = body;
+    } catch (error) {
+      data = { status: 'unavailable', message: error.name === 'AbortError' ? 'VirusTotal request timed out. Link safety is unverified.' : error.message.startsWith('Unexpected') ? 'Run python server.py to enable VirusTotal. Link safety is unverified.' : error.message };
+    } finally { clearTimeout(timeout); checking = false; }
+    saveCheck(data);
+    if (version !== resultVersion) return;
+    link.removeAttribute('aria-disabled');
+    flagged = a.warning || data.status === 'flagged';
+    unverified = data.status !== 'no_detections';
+    link.classList.toggle('red', flagged);
+    box.classList.toggle('warning', flagged);
+    heading.textContent = flagged ? '⚠ Suspicious link — take a closer look' : '↗ Link found';
+    const labels = {
+      flagged: '⚠ VirusTotal: threats reported',
+      no_detections: 'VirusTotal: no detections in the last report',
+      stale: 'VirusTotal: report is older than 7 days — unverified',
+      unknown: 'VirusTotal: incomplete report — unverified',
+      not_found: 'VirusTotal: no report — unverified',
+      queued: 'VirusTotal: analysis queued — unverified',
+      unavailable: 'VirusTotal unavailable — unverified'
+    };
+    vt.replaceChildren(node('strong', flagged ? 'red' : '', labels[data.status] || 'VirusTotal: unverified'));
+    if (data.stats) {
+      vt.append(node('p', data.status === 'flagged' ? 'red' : '', `${data.stats.malicious} malicious · ${data.stats.suspicious} suspicious · ${data.stats.harmless} harmless · ${data.stats.undetected} undetected · ${data.stats.timeout} timed out`));
+    }
+    if (data.last_analysis) vt.append(node('p', '', 'Last analyzed: ' + new Date(data.last_analysis).toLocaleString()));
+    vt.append(node('p', '', data.message || 'No report is available.'));
+    vt.append(node('p', '', 'No detections does not mean a link is safe. New threats may be missed.'));
+    const retry = node('button', 'secondary', 'Check report again');
+    retry.onclick = () => runCheck(); vt.append(retry);
+    if (data.status !== 'unavailable') {
+      const scan = node('button', 'secondary', 'Submit for a new scan');
+      scan.onclick = () => {
+        if (confirm('Send the full URL to VirusTotal for analysis? Submitted URLs may be shared with its security community. Do not submit private, login, or password-reset links.')) runCheck(true);
+      };
+      vt.append(scan);
+    }
+    if (data.report_url && data.report_url.startsWith('https://www.virustotal.com/gui/url/')) {
+      const reportLink = node('a', '', 'View VirusTotal report ↗');
+      reportLink.href = data.report_url; reportLink.target = '_blank'; reportLink.rel = 'noopener noreferrer';
+      vt.append(document.createElement('br'), reportLink);
+    }
+  }
+  if ($('vtEnabled').checked) runCheck();
+  else {
+    vt.append(node('p', '', 'VirusTotal is off. Link safety is unverified.'));
+    const check = node('button', 'secondary', 'Check with VirusTotal');
+    check.onclick = () => runCheck(); vt.append(check);
+  }
+}
+function renderHistory(){const list=$('historyList');list.replaceChildren();$('count').textContent=records.length;const visible=records.filter(r=>$('filter').value==='all'||r.type===$('filter').value);if(!visible.length){const empty=node('div','empty');empty.append(node('b','','◷'),node('span','',records.length?'No matching activity.':'Your next connection starts here. Scan or create a QR code.'));list.append(empty);return}for(const r of visible){const row=node('div','activity'),a=assess(r.text);if(r.virustotal?.status==='flagged')a.warning=true;row.append(node('span','activity-icon',r.type==='read'?'⌗':'＋'));const info=node('div','activity-main');info.append(node('strong',a.warning?'red':'',r.text),node('small','',new Date(r.date).toLocaleString()+' · '+r.source));if(r.virustotal)info.append(node('small',r.virustotal.status==='flagged'?'red':'','VirusTotal: '+r.virustotal.status.replaceAll('_',' ')));row.append(info,node('span','badge',r.type==='read'?'READ':'CREATED'));const view=node('button','','↗');view.setAttribute('aria-label','View activity');view.onclick=()=>{showResult(r.text,r);$('result').scrollIntoView({behavior:'smooth',block:'center'})};row.append(view);list.append(row)}}
 function stopCamera(){clearTimeout(timer);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('video').srcObject=null;$('video').hidden=true;$('camera').textContent='◎  Scan with camera'}
 function switchTab(generate){stopCamera();$('scanPanel').hidden=generate;$('generatePanel').hidden=!generate;$('scanTab').classList.toggle('active',!generate);$('generateTab').classList.toggle('active',generate);$('result').hidden=true;$('message').textContent=''}
 $('scanTab').onclick=()=>switchTab(false);$('generateTab').onclick=()=>switchTab(true);
