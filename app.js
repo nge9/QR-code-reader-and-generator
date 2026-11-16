@@ -9,6 +9,10 @@ let resultVersion = 0;
 function showResult(text, record = records.find(r => r.text === text)) {
   const version = ++resultVersion;
   const a = assess(text), box = $('result');
+  if (record?.virustotal?.status === 'flagged') {
+    a.warning = true;
+    a.reasons.push('A previous VirusTotal check flagged this URL. Review the latest report before opening.');
+  }
   box.replaceChildren(); box.hidden = false;
   box.className = a.warning ? 'warning' : '';
   const heading = node('strong', '', a.warning ? '⚠ Suspicious link — take a closer look' : a.url ? '↗ Link found' : '✓ QR content');
